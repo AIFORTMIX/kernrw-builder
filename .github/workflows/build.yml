@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (version matched)
+name: Build GKI Module (pure GKI, no phone config)
 
 on:
   push:
@@ -25,29 +25,16 @@ jobs:
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
+          # 使用纯 GKI 默认配置
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机配置并禁用冲突选项
-        run: |
-          cp config kernel/.config
-          cd kernel
-          # 禁用 ABI 和 Rust
-          scripts/config --file .config --disable CONFIG_ABI || true
-          scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
-          scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
-          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
-          scripts/config --file .config --disable CONFIG_ABI_REV || true
-          scripts/config --file .config --disable CONFIG_RUST || true
-          # 禁用可能导致 GCC 汇编错误的 LSE_ATOMICS
-          scripts/config --file .config --disable CONFIG_ARM64_LSE_ATOMICS || true
-          scripts/config --file .config --disable CONFIG_ARM64_USE_LSE_ATOMICS || true
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-
-      - name: 设置内核版本后缀
+      - name: 设置内核版本后缀（匹配手机）
         run: |
           cd kernel
-          # 将手机版本后缀写入 Makefile 的 EXTRAVERSION
+          # 将你的手机版本后缀写入 Makefile
           echo "EXTRAVERSION := -android14-11-g5929004f86ffc-ab10023717-4k" >> Makefile
+          # 重新生成配置
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
       - name: 执行 modules_prepare
         run: |
