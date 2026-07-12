@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (pure GKI)
+name: Build GKI Kernel Module (version matched)
 
 on:
   push:
@@ -27,6 +27,33 @@ jobs:
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
+      - name: 应用手机配置并禁用冲突选项
+        run: |
+          cp config kernel/.config
+          cd kernel
+          # 禁用 ABI 和 Rust
+          scripts/config --file .config --disable CONFIG_ABI || true
+          scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
+          scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
+          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
+          scripts/config --file .config --disable CONFIG_ABI_REV || true
+          scripts/config --file .config --disable CONFIG_RUST || true
+          # 禁用可能导致 GCC 汇编错误的 LSE_ATOMICS
+          scripts/config --file .config --disable CONFIG_ARM64_LSE_ATOMICS || true
+          scripts/config --file .config --disable CONFIG_ARM64_USE_LSE_ATOMICS || true
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: 设置内核版本后缀
+        run: |
+          cd kernel
+          # 将手机版本后缀写入 Makefile 的 EXTRAVERSION
+          echo "EXTRAVERSION := -android14-11-g5929004f86ffc-ab10023717-4k" >> Makefile
+
+      - name: 执行 modules_prepare
+        run: |
+          cd kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+
       - name: 将驱动源码复制到内核树
         run: |
           mkdir -p kernel/drivers/misc/kernrw
@@ -37,10 +64,10 @@ jobs:
       - name: 编译内核模块
         run: |
           cd kernel
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
+            KBUILD_CFLAGS="-Wno-error" \
             modules
 
       - name: 上传编译好的模块
