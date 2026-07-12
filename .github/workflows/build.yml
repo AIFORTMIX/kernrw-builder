@@ -1,9 +1,9 @@
-name: Build GKI Kernel Module
+name: Build GKI Kernel Module (Manual)
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:          # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,25 +12,53 @@ jobs:
       - name: 检出驱动源码
         uses: actions/checkout@v4
 
-      - name: 使用 GKI 构建内核模块
-        id: build
-        uses: feicong/android-kernel-build-action@v1
-        with:
-          arch: arm64
-          tag: android14-6.1
-          module-name: kernrw
-          module-path: drivers/misc/kernrw
+      - name: 安装编译工具链
+        run: |
+          sudo apt update
+          sudo apt install -y git make gcc flex bison bc rsync cpio \
+            clang lld binutils-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
+
+      - name: 下载 GKI 内核源码（android14-6.1）
+        run: |
+          # 使用 AOSP 官方 GKI 仓库（轻量，仅拉取必要分支）
+          git clone --depth 1 --branch android14-6.1 \
+            https://android.googlesource.com/kernel/common.git kernel
+          cd kernel
+          # 获取 GKI 默认配置
+          make ARCH=arm64 gki_defconfig
+
+      - name: 将驱动源码复制到内核树
+        run: |
+          # 创建驱动目录
+          mkdir -p kernel/drivers/misc/kernrw
+          # 复制你的驱动源码和 Makefile
+          cp drivers/misc/kernrw/kernrw.c kernel/drivers/misc/kernrw/
+          cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
+          # 修改内核 Kconfig（可选，但为了确保编译，我们用 Kbuild 直接指定）
+          echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
+
+      - name: 编译内核模块
+        run: |
+          cd kernel
+          # 只编译模块，不编译完整内核（节省时间）
+          make ARCH=arm64 CC=clang LLVM=1 \
+            M=drivers/misc/kernrw \
+            modules_prepare
+          make ARCH=arm64 CC=clang LLVM=1 \
+            M=drivers/misc/kernrw \
+            KBUILD_MODPOST_WARN=1 \
+            modules
 
       - name: 查找生成的模块
         id: find
         run: |
-          # 在当前工作目录下递归查找 kernrw.ko
           ko_file=$(find . -name "kernrw.ko" -type f | head -n 1)
           if [ -z "$ko_file" ]; then
-            echo "未找到 kernrw.ko，请检查编译日志"
+            echo "❌ 未找到 kernrw.ko，编译失败"
             exit 1
           fi
-          echo "找到模块: $ko_file"
+          echo "✅ 找到模块: $ko_file"
           echo "ko_path=$ko_file" >> $GITHUB_OUTPUT
 
       - name: 上传编译好的模块
