@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (Manual)
+name: Build GKI Kernel Module (GCC)
 
 on:
   push:
@@ -15,54 +15,41 @@ jobs:
       - name: 安装编译工具链
         run: |
           sudo apt update
-          sudo apt install -y git make gcc flex bison bc rsync cpio \
-            clang lld binutils-aarch64-linux-gnu \
+          sudo apt install -y git make flex bison bc rsync cpio \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             libc6-dev-arm64-cross
 
       - name: 下载 GKI 内核源码（android14-6.1）
         run: |
-          # 使用 AOSP 官方 GKI 仓库（轻量，仅拉取必要分支）
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
-          # 获取 GKI 默认配置
-          make ARCH=arm64 gki_defconfig
+          # 生成默认 GKI 配置
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
       - name: 将驱动源码复制到内核树
         run: |
-          # 创建驱动目录
           mkdir -p kernel/drivers/misc/kernrw
-          # 复制你的驱动源码和 Makefile
           cp drivers/misc/kernrw/kernrw.c kernel/drivers/misc/kernrw/
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
-          # 修改内核 Kconfig（可选，但为了确保编译，我们用 Kbuild 直接指定）
+          # 确保 Makefile 内容正确
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块
+      - name: 编译内核模块（使用 GCC）
         run: |
           cd kernel
-          # 只编译模块，不编译完整内核（节省时间）
-          make ARCH=arm64 CC=clang LLVM=1 \
-            M=drivers/misc/kernrw \
-            modules_prepare
-          make ARCH=arm64 CC=clang LLVM=1 \
+          # 准备构建环境
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          # 编译驱动模块
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
             modules
-
-      - name: 查找生成的模块
-        id: find
-        run: |
-          ko_file=$(find . -name "kernrw.ko" -type f | head -n 1)
-          if [ -z "$ko_file" ]; then
-            echo "❌ 未找到 kernrw.ko，编译失败"
-            exit 1
-          fi
-          echo "✅ 找到模块: $ko_file"
-          echo "ko_path=$ko_file" >> $GITHUB_OUTPUT
 
       - name: 上传编译好的模块
         uses: actions/upload-artifact@v4
         with:
           name: kernrw-ko
-          path: ${{ steps.find.outputs.ko_path }}
+          path: kernel/drivers/misc/kernrw/kernrw.ko
