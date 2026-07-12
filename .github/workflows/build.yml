@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (with phone config, Clang + LLD + llvm-nm)
+name: Build GKI Kernel Module (with phone config, full LLVM)
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
       - name: 检出驱动源码
         uses: actions/checkout@v4
 
-      - name: 安装编译工具链（包含 Clang、LLD、LLVM 工具）
+      - name: 安装编译工具链（完整 LLVM 工具链）
         run: |
           sudo apt update
           sudo apt install -y git make flex bison bc rsync cpio \
@@ -20,10 +20,11 @@ jobs:
             libc6-dev-arm64-cross \
             libelf-dev libdw-dev build-essential \
             clang-14 lld-14 llvm-14
-          # 设置软链接，使 clang、ld.lld、llvm-nm 命令可用
+          # 设置软链接
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-nm-14 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
 
       - name: 下载 GKI 内核源码（android14-6.1）
         run: |
@@ -45,11 +46,11 @@ jobs:
           scripts/config --file .config --disable CONFIG_RUST || true
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-      - name: 执行 modules_prepare（使用 Clang + LLD + llvm-nm）
+      - name: 执行 modules_prepare（使用完整 LLVM 工具链）
         run: |
           cd kernel
           touch abi_symbolistraw abi_whitelist_raw abi_whitelist
-          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm LLVM=1 \
+          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
 
       - name: 将驱动源码复制到内核树
@@ -59,10 +60,10 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（使用 Clang + LLD + llvm-nm）
+      - name: 编译内核模块（使用完整 LLVM 工具链）
         run: |
           cd kernel
-          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm LLVM=1 \
+          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
