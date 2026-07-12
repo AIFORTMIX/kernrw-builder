@@ -44,7 +44,6 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
-            KBUILD_CFLAGS="-Wno-error" \
             modules
 
       - name: 上传编译好的模块
