@@ -16,13 +16,25 @@ jobs:
         id: build
         uses: feicong/android-kernel-build-action@v1
         with:
-          arch: arm64                     # 架构
-          tag: android14-6.1             # 对应 Android 14 + Kernel 6.1
-          module-name: kernrw             # 模块名（将生成 kernrw.ko）
-          module-path: drivers/misc/kernrw # 驱动源码所在路径（相对于仓库根目录）
+          arch: arm64
+          tag: android14-6.1
+          module-name: kernrw
+          module-path: drivers/misc/kernrw
+
+      - name: 查找生成的模块
+        id: find
+        run: |
+          # 在当前工作目录下递归查找 kernrw.ko
+          ko_file=$(find . -name "kernrw.ko" -type f | head -n 1)
+          if [ -z "$ko_file" ]; then
+            echo "未找到 kernrw.ko，请检查编译日志"
+            exit 1
+          fi
+          echo "找到模块: $ko_file"
+          echo "ko_path=$ko_file" >> $GITHUB_OUTPUT
 
       - name: 上传编译好的模块
         uses: actions/upload-artifact@v4
         with:
           name: kernrw-ko
-          path: ${{ steps.build.outputs.module-path }}/kernrw.ko
+          path: ${{ steps.find.outputs.ko_path }}
