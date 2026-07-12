@@ -21,8 +21,8 @@ jobs:
 
       - name: 克隆红米 K70 Pro 内核源码（6.1）
         run: |
-          git clone --depth 1 --branch kernel-6.1 \
-            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          git clone --depth 1 --branch android14-6.1 \
+            https://github.com/LineageOS/android_kernel_xiaomi_manet.git kernel
           # 如果分支名不对，请根据实际分支调整（如 cancun-miuixxx）
           # 可在此处替换为具体提交hash或tag
 
