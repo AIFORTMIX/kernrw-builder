@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (with phone config, Clang)
+name: Build GKI Kernel Module (with phone config, Clang + LLD)
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
       - name: 检出驱动源码
         uses: actions/checkout@v4
 
-      - name: 安装编译工具链（包含 Clang）
+      - name: 安装编译工具链（包含 Clang 和 LLD）
         run: |
           sudo apt update
           sudo apt install -y git make flex bison bc rsync cpio \
@@ -20,9 +20,9 @@ jobs:
             libc6-dev-arm64-cross \
             libelf-dev libdw-dev build-essential \
             clang-14 lld-14
-          # 设置软链接，使 clang 命令可用
+          # 设置软链接，使 clang 和 ld.lld 命令可用
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
-          sudo ln -sf /usr/bin/lld-14 /usr/bin/lld
+          sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
 
       - name: 下载 GKI 内核源码（android14-6.1）
         run: |
@@ -31,23 +31,26 @@ jobs:
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机配置并彻底禁用 ABI
+      - name: 应用手机配置并彻底禁用 ABI 和 Rust
         run: |
           cp config kernel/.config
           cd kernel
+          # 禁用 ABI
           scripts/config --file .config --disable CONFIG_ABI || true
           scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
           scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
           scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
           scripts/config --file .config --disable CONFIG_ABI_REV || true
           sed -i '/[Aa][Bb][Ii]/d' .config
+          # 禁用 Rust（避免 rustc_cfg 错误）
+          scripts/config --file .config --disable CONFIG_RUST || true
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-      - name: 执行 modules_prepare（使用 Clang）
+      - name: 执行 modules_prepare（使用 Clang + LLD）
         run: |
           cd kernel
           touch abi_symbolistraw abi_whitelist_raw abi_whitelist
-          make ARCH=arm64 CC=clang LLVM=1 \
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
 
       - name: 将驱动源码复制到内核树
@@ -57,10 +60,10 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（使用 Clang）
+      - name: 编译内核模块（使用 Clang + LLD）
         run: |
           cd kernel
-          make ARCH=arm64 CC=clang LLVM=1 \
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
