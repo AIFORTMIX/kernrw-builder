@@ -1,4 +1,4 @@
-name: Build GKI Module (pure GKI, no phone config)
+name: Build GKI Module (pure GKI + Clang)
 
 on:
   push:
@@ -12,26 +12,35 @@ jobs:
       - name: 检出驱动源码
         uses: actions/checkout@v4
 
-      - name: 安装编译工具链
+      - name: 安装完整 LLVM 工具链
         run: |
           sudo apt update
           sudo apt install -y git make flex bison bc rsync cpio \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
-            libelf-dev libdw-dev build-essential
+            libelf-dev libdw-dev build-essential \
+            clang-14 lld-14 llvm-14
+          # 创建所有必要的软链接
+          sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
+          sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-nm-14 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
 
       - name: 下载 GKI 内核源码（android14-6.1）
         run: |
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
-          # 生成 GKI 默认配置（不会触发循环）
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 执行 modules_prepare（通过命令行传递 EXTRAVERSION）
+      - name: 执行 modules_prepare（Clang + 版本匹配）
         run: |
           cd kernel
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar \
+            OBJDUMP=llvm-objdump OBJCOPY=llvm-objcopy LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             EXTRAVERSION="-android14-11-g5929004f86ffc-ab10023717-4k" \
             modules_prepare
 
@@ -42,14 +51,16 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（通过命令行传递 EXTRAVERSION）
+      - name: 编译内核模块（Clang + 版本匹配）
         run: |
           cd kernel
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar \
+            OBJDUMP=llvm-objdump OBJCOPY=llvm-objcopy LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             EXTRAVERSION="-android14-11-g5929004f86ffc-ab10023717-4k" \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
-            KBUILD_CFLAGS="-Wno-error" \
+            KBUILD_CFLAGS="-Wno-error -Wno-unknown-warning-option" \
             modules
 
       - name: 上传编译好的模块
