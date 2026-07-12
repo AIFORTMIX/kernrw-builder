@@ -25,21 +25,15 @@ jobs:
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
-          # 使用纯 GKI 默认配置
+          # 生成 GKI 默认配置（不会触发循环）
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 设置内核版本后缀（匹配手机）
+      - name: 执行 modules_prepare（通过命令行传递 EXTRAVERSION）
         run: |
           cd kernel
-          # 将你的手机版本后缀写入 Makefile
-          echo "EXTRAVERSION := -android14-11-g5929004f86ffc-ab10023717-4k" >> Makefile
-          # 重新生成配置
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-
-      - name: 执行 modules_prepare
-        run: |
-          cd kernel
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            EXTRAVERSION="-android14-11-g5929004f86ffc-ab10023717-4k" \
+            modules_prepare
 
       - name: 将驱动源码复制到内核树
         run: |
@@ -48,10 +42,11 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块
+      - name: 编译内核模块（通过命令行传递 EXTRAVERSION）
         run: |
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            EXTRAVERSION="-android14-11-g5929004f86ffc-ab10023717-4k" \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
             KBUILD_CFLAGS="-Wno-error" \
