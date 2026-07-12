@@ -25,13 +25,13 @@ jobs:
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
-          # 生成默认 GKI 配置（作为基础，后面会覆盖）
+          # 生成默认 GKI 配置（作为基础）
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
       - name: 应用手机实际内核配置
         run: |
-          # 将仓库根目录的 .config 复制到内核源码目录
-          cp .config kernel/.config
+          # 注意：文件名是 config，不是 .config
+          cp config kernel/.config
           cd kernel
           # 根据新配置自动处理新增/删除的选项
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
@@ -41,13 +41,11 @@ jobs:
           mkdir -p kernel/drivers/misc/kernrw
           cp drivers/misc/kernrw/kernrw.c kernel/drivers/misc/kernrw/
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
-          # 确保 Makefile 内容正确
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
       - name: 编译内核模块（使用 GCC）
         run: |
           cd kernel
-          # 不再需要 olddefconfig，因为已在前面执行
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
