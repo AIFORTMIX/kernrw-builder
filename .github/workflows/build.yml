@@ -1,1 +1,66 @@
+name: Build Kernel Module (6.1.138)
 
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:          # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出你的驱动仓库
+        uses: actions/checkout@v4
+
+      - name: 安装交叉编译工具链
+        run: |
+          sudo apt update
+          sudo apt install -y clang lld binutils-aarch64-linux-gnu \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+              flex bison bc rsync cpio
+
+      - name: 克隆红米 K70 Pro 内核源码（6.1）
+        run: |
+          git clone --depth 1 --branch kernel-6.1 \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          # 如果分支名不对，请根据实际分支调整（如 cancun-miuixxx）
+          # 可在此处替换为具体提交hash或tag
+
+      - name: 复制配置文件
+        run: |
+          cp .config kernel/.config
+          cd kernel
+          # 更新旧配置，避免交互
+          make ARCH=arm64 olddefconfig
+
+      - name: 准备内核构建环境（生成头文件等）
+        run: |
+          cd kernel
+          # 仅生成模块编译所需的依赖，不编译整个内核（节省时间）
+          make ARCH=arm64 CC=clang LLVM=1 \
+            scripts_basic modules_prepare
+
+      - name: 编译你的驱动模块
+        run: |
+          cd kernel
+          # M 指向驱动所在路径（相对于内核根）
+          make ARCH=arm64 CC=clang LLVM=1 \
+            M=../drivers/misc/kernrw \
+            KBUILD_MODPOST_WARN=1 \
+            modules
+          # 模块生成在 kernel/drivers/misc/kernrw/kernrw.ko
+          # 但这里 M=../drivers/... 实际会输出到 ../drivers/... 下，但我们 cd 到了 kernel，模块会在 kernel 的相对路径下？
+          # 注意：M 路径相对于内核根，所以指定绝对路径更方便
+          # 修正：我们使用绝对路径，确保模块输出到当前目录下的 drivers/misc/kernrw
+
+      - name: 重新整理模块路径（修正输出）
+        run: |
+          # 由于上一步 M 路径为 ../drivers/misc/kernrw，编译结果会在 kernel/../drivers/misc/kernrw 即仓库根目录下的 drivers/misc/kernrw 里生成
+          # 我们直接复制到当前工作目录便于上传
+          cp drivers/misc/kernrw/kernrw.ko . 2>/dev/null || echo "模块未生成，请检查"
+
+      - name: 上传模块作为 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernrw-ko
+          path: kernrw.ko
