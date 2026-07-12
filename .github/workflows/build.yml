@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (with phone config, full LLVM)
+name: Build GKI Kernel Module (pure GKI)
 
 on:
   push:
@@ -12,21 +12,13 @@ jobs:
       - name: 检出驱动源码
         uses: actions/checkout@v4
 
-      - name: 安装编译工具链（完整 LLVM 工具链）
+      - name: 安装编译工具链
         run: |
           sudo apt update
           sudo apt install -y git make flex bison bc rsync cpio \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
-            libelf-dev libdw-dev build-essential \
-            clang-14 lld-14 llvm-14
-          # 设置所有必要的 LLVM 工具软链接
-          sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
-          sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
-          sudo ln -sf /usr/bin/llvm-nm-14 /usr/bin/llvm-nm
-          sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
-          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
-          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+            libelf-dev libdw-dev build-essential
 
       - name: 下载 GKI 内核源码（android14-6.1）
         run: |
@@ -35,27 +27,6 @@ jobs:
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机配置并彻底禁用 ABI 和 Rust
-        run: |
-          cp config kernel/.config
-          cd kernel
-          scripts/config --file .config --disable CONFIG_ABI || true
-          scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
-          scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
-          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
-          scripts/config --file .config --disable CONFIG_ABI_REV || true
-          sed -i '/[Aa][Bb][Ii]/d' .config
-          scripts/config --file .config --disable CONFIG_RUST || true
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-
-      - name: 执行 modules_prepare（使用完整 LLVM 工具链）
-        run: |
-          cd kernel
-          touch abi_symbolistraw abi_whitelist_raw abi_whitelist
-          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar \
-            OBJDUMP=llvm-objdump OBJCOPY=llvm-objcopy LLVM=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
-
       - name: 将驱动源码复制到内核树
         run: |
           mkdir -p kernel/drivers/misc/kernrw
@@ -63,15 +34,13 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（使用完整 LLVM 工具链）
+      - name: 编译内核模块
         run: |
           cd kernel
-          make ARCH=arm64 CC=clang LD=ld.lld NM=llvm-nm AR=llvm-ar \
-            OBJDUMP=llvm-objdump OBJCOPY=llvm-objcopy LLVM=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
-            KBUILD_CFLAGS="-Wno-error -Wno-unknown-warning-option" \
             modules
 
       - name: 上传编译好的模块
