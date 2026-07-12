@@ -25,16 +25,15 @@ jobs:
           git clone --depth 1 --branch android14-6.1 \
             https://android.googlesource.com/kernel/common.git kernel
           cd kernel
-          # 生成默认 GKI 配置（作为基础）
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
       - name: 应用手机实际内核配置
         run: |
-          # 注意：文件名是 config，不是 .config
           cp config kernel/.config
           cd kernel
-          # 根据新配置自动处理新增/删除的选项
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          # 创建空的 ABI 白名单文件，避免构建错误
+          touch abi_symbolistraw
 
       - name: 将驱动源码复制到内核树
         run: |
