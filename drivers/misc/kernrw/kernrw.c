@@ -62,12 +62,11 @@ static int manual_read_raw(pid_t pid, unsigned long va, void *buf, size_t size);
 
 // ----- 全局符号指针（动态解析）-----
 static void *(*phys_to_virt_symbol)(phys_addr_t phys) = NULL;
-static unsigned long memstart_addr = 0;
 
 // ----- 核心：手动遍历页表（绕过VMA）-----
 static int manual_read_raw(pid_t pid, unsigned long user_va, void *kbuf, size_t size) {
     struct task_struct *task;
-    pgd_t *pgdp, *pgd;
+    pgd_t *pgdp;
     p4d_t *p4d;
     pud_t *pud;
     pmd_t *pmd;
@@ -251,8 +250,6 @@ static int __init kernrw_init(void) {
         pr_err("kernrw: phys_to_virt not found, aborting\n");
         return -ENOENT;
     }
-    memstart_addr = (unsigned long)kallsyms_lookup_name("memstart_addr");
-    if (!memstart_addr) pr_warn("kernrw: memstart_addr not found, fallback disabled\n");
 
     // 2. 创建 /proc/kernrw 入口
     if (!proc_create("kernrw", 0666, NULL, &fops)) {
@@ -279,4 +276,4 @@ module_exit(kernrw_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("KSU Developer");
 MODULE_DESCRIPTION("Undetected memory reader for Redmi K70 Pro (6.1.138)");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.1");
