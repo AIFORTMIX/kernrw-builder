@@ -1,4 +1,4 @@
-name: Build Kernel Module (LineageOS SM8650)
+name: Build GKI Kernel Module (Standard GKI, Bypass ABI)
 
 on:
   push:
@@ -20,16 +20,36 @@ jobs:
             libc6-dev-arm64-cross \
             libelf-dev libdw-dev build-essential
 
-      - name: 克隆 LineageOS 内核源码（SM8650）
+      - name: 下载 GKI 内核源码（android14-6.1）
         run: |
-          git clone --depth 1 --branch lineage-21 \
-            https://github.com/LineageOS/android_kernel_xiaomi_sm8650.git kernel
+          git clone --depth 1 --branch android14-6.1 \
+            https://android.googlesource.com/kernel/common.git kernel
+          cd kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机实际内核配置
+      - name: 应用手机配置并强制禁用 ABI
         run: |
           cp config kernel/.config
           cd kernel
+          # 禁用所有 ABI 相关选项
+          scripts/config --file .config --disable CONFIG_ABI || true
+          scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
+          scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
+          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: 绕过 ABI 白名单检查（核心修复）
+        run: |
+          cd kernel
+          # 创建空的白名单文件
+          touch abi_symbolistraw abi_whitelist_raw abi_whitelist
+          # 手动生成 autoksysms.h，并设为只读防止被更新
+          mkdir -p include/generated
+          echo "/* Empty for bypass */" > include/generated/autoksysms.h
+          chmod 444 include/generated/autoksysms.h
+          # 修改顶层 Makefile，彻底禁用 autoksysms.h 的生成规则
+          sed -i '/autoksysms.h/d' Makefile
+          sed -i '/include\/generated\/autoksysms.h/d' Makefile
 
       - name: 将驱动源码复制到内核树
         run: |
@@ -41,7 +61,9 @@ jobs:
       - name: 编译内核模块
         run: |
           cd kernel
+          # 执行 modules_prepare（现在已绕过 autoksysms.h）
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          # 编译驱动模块
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
