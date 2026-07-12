@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (GCC)
+name: Build Kernel Module (LineageOS SM8650)
 
 on:
   push:
@@ -20,33 +20,16 @@ jobs:
             libc6-dev-arm64-cross \
             libelf-dev libdw-dev build-essential
 
-      - name: 下载 GKI 内核源码（android14-6.1）
+      - name: 克隆 LineageOS 内核源码（SM8650）
         run: |
-          git clone --depth 1 --branch android14-6.1 \
-            https://android.googlesource.com/kernel/common.git kernel
-          cd kernel
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          git clone --depth 1 --branch lineage-21 \
+            https://github.com/LineageOS/android_kernel_xiaomi_sm8650.git kernel
 
-      - name: 应用手机实际内核配置并修复 ABI 检查
+      - name: 应用手机实际内核配置
         run: |
           cp config kernel/.config
           cd kernel
-          # 先禁用 ABI 相关功能
-          scripts/config --file .config --disable CONFIG_ABI || true
-          scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          
-          # 创建必要的空文件
-          touch abi_symbolistraw
-          touch abi_whitelist_raw
-          touch abi_whitelist
-          
-          # 关键：修改 Makefile，注释掉 autoksysms.h 的生成规则
-          sed -i '/autoksysms.h/s/^/#/' Makefile || true
-          
-          # 手动创建 autoksysms.h 防止后续错误
-          mkdir -p include/generated
-          echo "/* Empty */" > include/generated/autoksysms.h
 
       - name: 将驱动源码复制到内核树
         run: |
@@ -55,7 +38,7 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（使用 GCC）
+      - name: 编译内核模块
         run: |
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
