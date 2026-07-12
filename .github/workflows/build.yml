@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (Direct Compile)
+name: Build GKI Kernel Module (with phone config, ABI disabled)
 
 on:
   push:
@@ -27,26 +27,28 @@ jobs:
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机配置并禁用 ABI
+      - name: 应用手机配置并彻底禁用 ABI
         run: |
           cp config kernel/.config
           cd kernel
+          # 使用 scripts/config 禁用所有 ABI 相关选项
           scripts/config --file .config --disable CONFIG_ABI || true
           scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
           scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
+          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
+          scripts/config --file .config --disable CONFIG_ABI_REV || true
+          # 强力删除 .config 中任何包含 "ABI" 或 "abi" 的行（以防万一）
+          sed -i '/[Aa][Bb][Ii]/d' .config
+          # 重新生成配置
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-      - name: 生成必要的构建脚本和头文件（不执行 modules_prepare）
+      - name: 绕过 ABI 白名单并执行 modules_prepare
         run: |
           cd kernel
-          # 只构建脚本和基础头文件，不触发 autoksysms.h
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- headers_install
-          # 手动创建 Module.symvers（空文件）
-          touch Module.symvers
-          # 创建必要的 include 目录
-          mkdir -p include/generated
-          echo "/* bypass */" > include/generated/autoksysms.h
+          # 创建空的白名单文件（可能仍被检查，但已禁用选项）
+          touch abi_symbolistraw abi_whitelist_raw abi_whitelist
+          # 执行 modules_prepare，现在 ABI 已禁用，应该通过
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
 
       - name: 将驱动源码复制到内核树
         run: |
@@ -55,7 +57,7 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块（直接编译，不执行 modules_prepare）
+      - name: 编译内核模块
         run: |
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
