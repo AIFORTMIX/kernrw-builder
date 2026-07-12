@@ -1,4 +1,4 @@
-name: Build GKI Kernel Module (Standard GKI, Bypass ABI)
+name: Build GKI Kernel Module (Direct Compile)
 
 on:
   push:
@@ -27,29 +27,26 @@ jobs:
           cd kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
 
-      - name: 应用手机配置并强制禁用 ABI
+      - name: 应用手机配置并禁用 ABI
         run: |
           cp config kernel/.config
           cd kernel
-          # 禁用所有 ABI 相关选项
           scripts/config --file .config --disable CONFIG_ABI || true
           scripts/config --file .config --disable CONFIG_ABI_MONITOR || true
           scripts/config --file .config --disable CONFIG_KABI_RESERVED || true
-          scripts/config --file .config --disable CONFIG_KABI_ABI_REV || true
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
-      - name: 绕过 ABI 白名单检查（核心修复）
+      - name: 生成必要的构建脚本和头文件（不执行 modules_prepare）
         run: |
           cd kernel
-          # 创建空的白名单文件
-          touch abi_symbolistraw abi_whitelist_raw abi_whitelist
-          # 手动生成 autoksysms.h，并设为只读防止被更新
+          # 只构建脚本和基础头文件，不触发 autoksysms.h
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- headers_install
+          # 手动创建 Module.symvers（空文件）
+          touch Module.symvers
+          # 创建必要的 include 目录
           mkdir -p include/generated
-          echo "/* Empty for bypass */" > include/generated/autoksysms.h
-          chmod 444 include/generated/autoksysms.h
-          # 修改顶层 Makefile，彻底禁用 autoksysms.h 的生成规则
-          sed -i '/autoksysms.h/d' Makefile
-          sed -i '/include\/generated\/autoksysms.h/d' Makefile
+          echo "/* bypass */" > include/generated/autoksysms.h
 
       - name: 将驱动源码复制到内核树
         run: |
@@ -58,12 +55,9 @@ jobs:
           cp drivers/misc/kernrw/Makefile kernel/drivers/misc/kernrw/
           echo "obj-m += kernrw.o" > kernel/drivers/misc/kernrw/Makefile
 
-      - name: 编译内核模块
+      - name: 编译内核模块（直接编译，不执行 modules_prepare）
         run: |
           cd kernel
-          # 执行 modules_prepare（现在已绕过 autoksysms.h）
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
-          # 编译驱动模块
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/misc/kernrw \
             KBUILD_MODPOST_WARN=1 \
