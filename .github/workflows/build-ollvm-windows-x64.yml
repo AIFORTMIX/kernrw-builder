@@ -1,0 +1,613 @@
+# ============================================================================
+# GitHub Actions Workflow: Build OLLVM (Obfuscator-LLVM) as a NewPM Pass
+# Plugin DLL for LLVM 19.x on Windows x64
+#
+# This workflow:
+#   1. Sets up the Windows MSVC (cl.exe) build environment
+#   2. Clones LLVM 19.1.0 source code from the official repository
+#   3. Clones OLLVM obfuscation pass sources from DreamSoule/ollvm17
+#   4. Applies the Obfuscation passes (sub/bcf/fla/split/sobf/ibr/icall/igv)
+#      into the LLVM source tree as a standalone plugin project
+#   5. Configures and builds LLVM libraries (Release, with clang,
+#      AArch64/ARM/X86 targets) using cmake + ninja + MSVC (cl.exe)
+#   6. Builds the OLLVM obfuscation passes as a standalone loadable plugin DLL
+#   7. Uploads the resulting plugin DLL as a downloadable artifact
+#
+# Usage:
+#   - Push to the main branch (or any branch) to trigger
+#   - Or manually trigger via GitHub Actions -> workflow_dispatch
+# ============================================================================
+
+name: Build OLLVM Plugin for LLVM 19 (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: 'LLVM git ref (tag or branch)'
+        required: true
+        default: 'llvmorg-19.1.0'
+      obfuscation_repo:
+        description: 'Obfuscation pass source repository'
+        required: true
+        default: 'https://github.com/DreamSoule/ollvm17.git'
+  push:
+    branches: [main]
+
+env:
+  # LLVM source tag – llvmorg-19.1.0 is the first LLVM 19 release.
+  # Note: There is no llvmorg-19.0.1 tag; the LLVM 19 series starts at 19.1.0.
+  LLVM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.llvm_ref || 'llvmorg-19.1.0' }}
+  OBFUSCATION_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.obfuscation_repo || 'https://github.com/DreamSoule/ollvm17.git' }}
+  BUILD_TYPE: Release
+  PLUGIN_NAME: OLLVM-Obfuscator
+
+jobs:
+  build-ollvm-plugin:
+    runs-on: windows-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # Step 1: Checkout the workflow repository itself
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ------------------------------------------------------------------
+      # Step 2: Set up Visual Studio Developer Command Prompt (MSVC)
+      # ------------------------------------------------------------------
+      - name: Setup Visual Studio MSVC environment
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: 'latest'
+
+      - name: Enable Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ------------------------------------------------------------------
+      # Step 3: Install Ninja build system
+      # ------------------------------------------------------------------
+      - name: Install Ninja
+        run: choco install ninja --no-progress --yes
+
+      # ------------------------------------------------------------------
+      # Step 4: Install Python (required by LLVM build system)
+      # ------------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ------------------------------------------------------------------
+      # Step 5: Clone LLVM source code
+      # ------------------------------------------------------------------
+      - name: Clone LLVM ${{ env.LLVM_REF }}
+        shell: pwsh
+        run: |
+          Write-Host "Cloning LLVM at ref: $env:LLVM_REF"
+          git clone --depth 1 --branch $env:LLVM_REF `
+            https://github.com/llvm/llvm-project.git llvm-project
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to clone LLVM at ref $env:LLVM_REF"
+          }
+          Write-Host "LLVM source cloned successfully"
+          git -C llvm-project log --oneline -1
+
+      # ------------------------------------------------------------------
+      # Step 6: Clone OLLVM obfuscation pass sources
+      # ------------------------------------------------------------------
+      - name: Clone OLLVM obfuscation pass sources
+        shell: pwsh
+        run: |
+          Write-Host "Cloning obfuscation sources from: $env:OBFUSCATION_REPO"
+          git clone --depth 1 $env:OBFUSCATION_REPO ollvm17
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to clone obfuscation repository"
+          }
+          Write-Host "Obfuscation sources cloned successfully"
+          git -C ollvm17 log --oneline -1
+
+      # ------------------------------------------------------------------
+      # Step 7: Apply Obfuscation passes to the LLVM source tree
+      #
+      # The DreamSoule/ollvm17 repository provides NewPM-compatible
+      # obfuscation passes in llvm-project/llvm/lib/Passes/Obfuscation/
+      #
+      # We copy the Obfuscation/ directory into the LLVM source tree,
+      # then create a standalone plugin project that compiles the
+      # obfuscation source files into a loadable module (DLL).
+      #
+      # The plugin registers the passes via llvm::PassPluginLibraryInfo,
+      # which is the standard LLVM NewPM plugin mechanism.
+      # The plugin DLL can be loaded via:
+      #   clang -fpass-plugin=OLLVM-Obfuscator.dll
+      #
+      # NOTE: We do NOT patch PassBuilder.cpp in the LLVM source tree.
+      # The Obfuscation passes are registered by the plugin itself,
+      # not by the LLVM PassBuilder. This avoids conflicts and keeps
+      # the LLVM source tree clean.
+      # ------------------------------------------------------------------
+      - name: Apply OLLVM obfuscation passes to LLVM source tree
+        shell: pwsh
+        run: |
+          # ----------------------------------------------------------------
+          # 7a) Copy the Obfuscation directory into the LLVM source tree
+          # ----------------------------------------------------------------
+          $src = "ollvm17/llvm-project/llvm/lib/Passes/Obfuscation"
+          $dst = "llvm-project/llvm/lib/Passes/Obfuscation"
+
+          if (-not (Test-Path $src)) {
+            Write-Host "ERROR: Source Obfuscation directory not found at $src"
+            Get-ChildItem "ollvm17/llvm-project/llvm/lib/Passes" -Name
+            throw "Obfuscation directory not found in cloned repository"
+          }
+
+          Write-Host "Copying Obfuscation/ from $src to $dst"
+          Copy-Item -Recurse -Force $src $dst
+
+          # Verify the copy
+          Write-Host "Obfuscation directory contents:"
+          Get-ChildItem -Path $dst -Name
+
+      # ------------------------------------------------------------------
+      # Step 8: Create the standalone plugin project
+      #
+      # This creates a loadable module (DLL) that can be loaded via
+      # clang -fpass-plugin=OLLVM-Obfuscator.dll
+      #
+      # The plugin project:
+      #   - Uses add_llvm_loadable_module() to create a loadable DLL
+      #   - Compiles the Obfuscation source files into the plugin
+      #   - Registers passes via llvm::PassPluginLibraryInfo
+      # ------------------------------------------------------------------
+      - name: Create standalone plugin project
+        shell: pwsh
+        run: |
+          # Create the plugin directory
+          $pluginDir = "llvm-project/llvm/lib/Passes/OllvmPlugin"
+          New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
+
+          # ----------------------------------------------------------------
+          # 8a) Create the plugin CMakeLists.txt
+          # ----------------------------------------------------------------
+          $pluginCmake = @'
+# ============================================================================
+# CMakeLists.txt — OLLVM standalone loadable plugin (DLL)
+#
+# This builds the OLLVM obfuscation passes as a standalone plugin DLL
+# that can be loaded via:
+#   clang -fpass-plugin=OLLVM-Obfuscator.dll ...
+#
+# The plugin is built as a loadable module using add_llvm_loadable_module,
+# which is the standard LLVM mechanism for out-of-tree pass plugins.
+# ============================================================================
+
+# Define the loadable module.
+# add_llvm_loadable_module creates a shared library (DLL on Windows)
+# that LLVM's plugin loader can discover and load at runtime.
+add_llvm_loadable_module(OLLVM-Obfuscator
+  # Plugin entry point — registers passes via llvm::PassPluginLibraryInfo
+  OllvmPlugin.cpp
+
+  # Obfuscation pass source files
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/BogusControlFlow.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/CryptoUtils.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/Flattening.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/IPObfuscationContext.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/ObfuscationOptions.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/SplitBasicBlock.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/StringEncryption.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/Substitution.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/Utils.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/IndirectBranch.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/IndirectCall.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation/IndirectGlobalVariable.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation
+
+  DEPENDS
+  intrinsics_gen
+
+  LINK_COMPONENTS
+  Core
+  Support
+  Passes
+  TransformUtils
+  Analysis
+  IPO
+  Scalar
+  InstCombine
+  AggressiveInstCombine
+  Vectorize
+  Instrumentation
+  CodeGen
+  Target
+  IRPrinter
+  ObjCARC
+  Coroutines
+)
+
+# Enable C++17 (required by LLVM 19)
+target_compile_features(OLLVM-Obfuscator PRIVATE cxx_std_17)
+
+# The Obfuscation source files use #include "Obfuscation/xxx.h" patterns,
+# so we need to add the parent directory of Obfuscation/ to the include path.
+target_include_directories(OLLVM-Obfuscator PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
+  ${LLVM_MAIN_INCLUDE_DIR}
+)
+
+# The Obfuscation source files also include "CryptoUtils.h" directly,
+# so we add the Obfuscation directory itself to the include path.
+target_include_directories(OLLVM-Obfuscator PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../Obfuscation
+)
+
+# Set output directory for the plugin DLL
+set_target_properties(OLLVM-Obfuscator PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/OLLVMPlugin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/OLLVMPlugin"
+)
+'@
+          Set-Content -Path "$pluginDir/CMakeLists.txt" -Value $pluginCmake -Encoding UTF8
+
+          # ----------------------------------------------------------------
+          # 8b) Create the plugin entry point (OllvmPlugin.cpp)
+          #
+          # This file is the entry point for the OLLVM standalone pass
+          # plugin DLL. It registers the obfuscation passes using the
+          # LLVM NewPM plugin API (llvm::PassPluginLibraryInfo).
+          #
+          # The plugin is loaded by clang via:
+          #   clang -fpass-plugin=OLLVM-Obfuscator.dll [flags] source.c
+          #
+          # Supported obfuscation passes (enabled via command-line flags):
+          #   -split     : Split basic blocks
+          #   -sobf      : String encryption
+          #   -fla       : Control flow flattening
+          #   -sub       : Instruction substitution
+          #   -bcf       : Bogus control flow
+          #   -ibr       : Indirect branch
+          #   -icall     : Indirect call
+          #   -igv       : Indirect global variable
+          # ----------------------------------------------------------------
+          $pluginCpp = @'
+// ============================================================================
+// OllvmPlugin.cpp — OLLVM Obfuscator LLVM Pass Plugin Entry Point
+//
+// This is the entry point for the OLLVM standalone pass plugin DLL.
+// It registers the obfuscation passes using the LLVM NewPM plugin API
+// (llvm::PassPluginLibraryInfo), which allows the plugin to be loaded
+// dynamically via:
+//   clang -fpass-plugin=OLLVM-Obfuscator.dll [other flags] source.c
+//
+// The obfuscation passes are enabled individually via command-line flags
+// like -fla, -bcf, -sub, etc. Each flag enables a specific obfuscation
+// pass. Multiple flags can be combined for layered obfuscation.
+// ============================================================================
+
+#include "llvm/Passes/PassPlugin.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/raw_ostream.h"
+
+// Obfuscation pass headers
+#include "Obfuscation/BogusControlFlow.h"
+#include "Obfuscation/Flattening.h"
+#include "Obfuscation/SplitBasicBlock.h"
+#include "Obfuscation/Substitution.h"
+#include "Obfuscation/StringEncryption.h"
+#include "Obfuscation/IndirectBranch.h"
+#include "Obfuscation/IndirectCall.h"
+#include "Obfuscation/IndirectGlobalVariable.h"
+#include "Obfuscation/Utils.h"
+
+using namespace llvm;
+
+// ============================================================================
+// Command-Line Options
+// Each obfuscation pass is enabled by a corresponding -Xclang -mllvm flag.
+// Example: clang -fpass-plugin=OLLVM-Obfuscator.dll -Xclang -mllvm -fla test.c
+// ============================================================================
+static cl::opt<bool> ObfSplit("split", cl::init(false),
+    cl::desc("SplitBasicBlock: split basic blocks before obfuscation"));
+
+static cl::opt<bool> ObfSobf("sobf", cl::init(false),
+    cl::desc("String Obfuscation: encrypt string literals"));
+
+static cl::opt<bool> ObfFLA("fla", cl::init(false),
+    cl::desc("Flattening: control flow flattening (obfuscate CFG)"));
+
+static cl::opt<bool> ObfSub("sub", cl::init(false),
+    cl::desc("Substitution: instruction substitution (obfuscate arithmetic)"));
+
+static cl::opt<bool> ObfBCF("bcf", cl::init(false),
+    cl::desc("BogusControlFlow: insert dead code and opaque predicates"));
+
+static cl::opt<bool> ObfIBR("ibr", cl::init(false),
+    cl::desc("Indirect Branch: convert direct branches to indirect"));
+
+static cl::opt<bool> ObfICall("icall", cl::init(false),
+    cl::desc("Indirect Call: convert direct calls to indirect"));
+
+static cl::opt<bool> ObfIGV("igv", cl::init(false),
+    cl::desc("Indirect Global Variable: obfuscate global variable access"));
+
+static cl::opt<bool> ObfFnCmd("fncmd", cl::init(false),
+    cl::desc("Use function name to control obfuscation (_ + cmd + _)"));
+
+// Obfuscation function name control flag (defined in Utils.h)
+extern bool obf_function_name_cmd;
+
+// ============================================================================
+// Plugin Registration
+// ============================================================================
+
+/// Entry point callback that registers the OLLVM passes with the pass
+/// builder. This callback is invoked by LLVM's plugin loader when the
+/// plugin is loaded via -fpass-plugin=.
+static void registerOLLVMPassCallbacks(PassBuilder &PB) {
+  PB.registerPipelineStartEPCallback(
+    [](ModulePassManager &MPM, OptimizationLevel Level) {
+      // Set the function name control flag
+      obf_function_name_cmd = ObfFnCmd;
+
+      if (ObfSobf || ObfSplit || ObfFLA || ObfSub || ObfBCF ||
+          ObfIBR || ObfICall || ObfIGV) {
+        outs() << "[OLLVM] Obfuscation passes enabled.\n";
+      }
+
+      // --- Module Pass: String Encryption ---
+      // Run first so encrypted strings are in place before block splitting
+      MPM.addPass(StringEncryptionPass(ObfSobf));
+
+      // --- Function Passes (wrapped in Module->Function adaptor) ---
+      FunctionPassManager FPM;
+
+      // Indirect call obfuscation
+      FPM.addPass(IndirectCallPass(ObfICall));
+
+      // Basic block splitting (run before fla/bcf/sub for better results)
+      FPM.addPass(SplitBasicBlockPass(ObfSplit));
+
+      // Control flow flattening
+      FPM.addPass(FlatteningPass(ObfFLA));
+
+      // Instruction substitution
+      FPM.addPass(SubstitutionPass(ObfSub));
+
+      // Bogus control flow
+      FPM.addPass(BogusControlFlowPass(ObfBCF));
+
+      // Wrap function passes and add to module pipeline
+      MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+
+      // --- Module Passes (run after function passes) ---
+      // Indirect branch obfuscation
+      MPM.addPass(IndirectBranchPass(ObfIBR));
+
+      // Indirect global variable obfuscation
+      MPM.addPass(IndirectGlobalVariablePass(ObfIGV));
+    }
+  );
+}
+
+// ============================================================================
+// Plugin Information Structure
+// This is the mandatory entry point that LLVM's plugin loader looks for.
+// ============================================================================
+PassPluginLibraryInfo getPassPluginInfo() {
+  return {
+    LLVM_PLUGIN_API_VERSION,        // API version (must match LLVM version)
+    "OLLVM-Obfuscator",             // Plugin name
+    "19.1.0",                       // Plugin version
+    [](PassBuilder &PB) {
+      registerOLLVMPassCallbacks(PB);
+    }
+  };
+}
+
+/// The LLVM plugin loader calls this function to obtain plugin information.
+/// The function must be extern "C" and have the exact signature:
+///   extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
+llvmGetPassPluginInfo() {
+  return getPassPluginInfo();
+}
+'@
+          Set-Content -Path "$pluginDir/OllvmPlugin.cpp" -Value $pluginCpp -Encoding UTF8
+
+          Write-Host "Plugin project created successfully at $pluginDir"
+          Get-ChildItem -Path $pluginDir -Name
+
+      # ------------------------------------------------------------------
+      # Step 9: Add the plugin subdirectory to the parent CMakeLists.txt
+      # ------------------------------------------------------------------
+      - name: Add plugin subdirectory to LLVM Passes CMakeLists.txt
+        shell: pwsh
+        run: |
+          # Add the plugin subdirectory to llvm/lib/Passes/CMakeLists.txt
+          $cmakeFile = "llvm-project/llvm/lib/Passes/CMakeLists.txt"
+          $content = Get-Content $cmakeFile -Raw
+
+          $pluginSubdir = "`n# OLLVM standalone plugin`nadd_subdirectory(OllvmPlugin)`n"
+
+          # Append the plugin subdirectory at the end of the file
+          Set-Content -Path $cmakeFile -Value ($content + $pluginSubdir) -Encoding UTF8
+          Write-Host "Added plugin subdirectory to CMakeLists.txt"
+
+      # ------------------------------------------------------------------
+      # Step 10: Configure LLVM with CMake
+      #
+      # Configuration flags:
+      #   - Ninja generator for fast parallel builds
+      #   - Release build type for optimized libraries
+      #   - clang enabled (required for the plugin to work with clang)
+      #   - AArch64, ARM, X86 targets (Android/iOS/Windows support)
+      #   - LLVM_ENABLE_PLUGINS=ON (required for loadable module support)
+      #   - MSVC (cl.exe) as the C/C++ compiler
+      # ------------------------------------------------------------------
+      - name: Configure LLVM build with CMake
+        shell: pwsh
+        run: |
+          # Verify MSVC compiler is available
+          Write-Host "Checking MSVC compiler..."
+          $msvcCheck = cl.exe 2>&1 | Out-String
+          Write-Host $msvcCheck
+
+          # Build the cmake argument array
+          $cmakeArgs = @(
+            "-S", "llvm-project/llvm",
+            "-B", "build",
+            "-G", "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DLLVM_ENABLE_PROJECTS=clang",
+            "-DLLVM_TARGETS_TO_BUILD=AArch64;ARM;X86",
+            "-DLLVM_ENABLE_ASSERTIONS=OFF",
+            "-DLLVM_INCLUDE_TESTS=OFF",
+            "-DLLVM_INCLUDE_EXAMPLES=OFF",
+            "-DLLVM_INCLUDE_DOCS=OFF",
+            "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+            "-DLLVM_ENABLE_PLUGINS=ON",
+            "-DLLVM_BUILD_LLVM_DYLIB=OFF",
+            "-DLLVM_ENABLE_EH=OFF",
+            "-DLLVM_ENABLE_RTTI=OFF",
+            "-DCMAKE_C_COMPILER=cl",
+            "-DCMAKE_CXX_COMPILER=cl",
+            "-DCMAKE_CXX_STANDARD=17"
+          )
+
+          Write-Host "Running cmake configuration..."
+          cmake $cmakeArgs 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configuration failed. Check the errors above."
+          }
+          Write-Host "CMake configuration completed successfully"
+
+      # ------------------------------------------------------------------
+      # Step 11: Build LLVM libraries
+      #
+      # We build specific targets to minimize build time:
+      #   - LLVMPasses: the pass library (includes the Obfuscation passes)
+      #   - clang: the compiler frontend (needed to test the plugin)
+      #   - intrinsics_gen: generated LLVM intrinsics headers
+      # ------------------------------------------------------------------
+      - name: Build LLVM libraries
+        shell: pwsh
+        run: |
+          Write-Host "Building LLVM libraries..."
+          Write-Host "This step may take 1-2 hours depending on the runner."
+
+          # Build intrinsics_gen first (required dependency)
+          Write-Host "Step 1/3: Building intrinsics_gen..."
+          ninja -C build intrinsics_gen 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "intrinsics_gen build failed"
+          }
+
+          # Build LLVMPasses (includes the Obfuscation source files)
+          Write-Host "Step 2/3: Building LLVMPasses..."
+          ninja -C build LLVMPasses 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "LLVMPasses build failed"
+          }
+
+          # Build clang (needed to use the plugin)
+          Write-Host "Step 3/3: Building clang..."
+          ninja -C build clang 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "clang build failed"
+          }
+
+          Write-Host "LLVM libraries built successfully"
+
+      # ------------------------------------------------------------------
+      # Step 12: Build the OLLVM plugin DLL
+      # ------------------------------------------------------------------
+      - name: Build OLLVM plugin DLL
+        shell: pwsh
+        run: |
+          Write-Host "Building the OLLVM obfuscator plugin DLL..."
+          ninja -C build OLLVM-Obfuscator 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "OLLVM plugin build failed"
+          }
+
+          # Locate the plugin DLL and PDB
+          Write-Host "Searching for plugin DLL..."
+          $pluginFiles = Get-ChildItem -Path "build" -Recurse -Filter "*OLLVM-Obfuscator*" | `
+            Where-Object { $_.Extension -in '.dll', '.pdb' } | `
+            Select-Object FullName, Length
+
+          if ($pluginFiles.Count -eq 0) {
+            Write-Host "WARNING: Plugin DLL not found in recursive search."
+            Write-Host "Checking common output directories..."
+            $checkPaths = @(
+              "build/lib/OLLVMPlugin",
+              "build/bin/OLLVMPlugin",
+              "build/lib",
+              "build/bin"
+            )
+            foreach ($p in $checkPaths) {
+              if (Test-Path $p) {
+                Write-Host "Contents of $p :"
+                Get-ChildItem -Path $p -Filter "*OLLVM*" | Format-Table Name, Length
+              }
+            }
+            throw "Plugin DLL not found"
+          }
+
+          Write-Host "Plugin DLL found:"
+          $pluginFiles | Format-Table -AutoSize
+
+          # Copy the plugin DLL to a known location for upload
+          $pluginDll = $pluginFiles | Where-Object { $_.Extension -eq '.dll' } | Select-Object -First 1
+          if ($pluginDll) {
+            $outputDir = "build/ollvm-plugin-output"
+            New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+            Copy-Item -Path $pluginDll.FullName -Destination "$outputDir/OLLVM-Obfuscator.dll" -Force
+            Write-Host "Plugin DLL copied to $outputDir/OLLVM-Obfuscator.dll"
+
+            # Also copy the PDB if available
+            $pluginPdb = $pluginFiles | Where-Object { $_.Extension -eq '.pdb' } | Select-Object -First 1
+            if ($pluginPdb) {
+              Copy-Item -Path $pluginPdb.FullName -Destination "$outputDir/OLLVM-Obfuscator.pdb" -Force
+              Write-Host "Plugin PDB copied to $outputDir/OLLVM-Obfuscator.pdb"
+            }
+          }
+
+      # ------------------------------------------------------------------
+      # Step 13: Upload the plugin DLL as artifact
+      # ------------------------------------------------------------------
+      - name: Upload OLLVM plugin DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OLLVM-Plugin-LLVM19-Windows-x64
+          path: |
+            build/ollvm-plugin-output/OLLVM-Obfuscator.dll
+            build/ollvm-plugin-output/OLLVM-Obfuscator.pdb
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # Step 14: (Optional) Upload the full LLVM build with OLLVM integrated
+      # ------------------------------------------------------------------
+      - name: Upload LLVM build with OLLVM (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLVM-with-OLLVM-Windows-x64
+          path: |
+            build/bin/clang.exe
+            build/bin/clang++.exe
+            build/bin/llvm-config.exe
+            build/lib/*.lib
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 7
