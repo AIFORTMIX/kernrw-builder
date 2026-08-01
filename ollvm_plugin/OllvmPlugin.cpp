@@ -137,7 +137,17 @@ PassPluginLibraryInfo getPassPluginInfo() {
 /// The LLVM plugin loader calls this function to obtain plugin information.
 /// The function must be extern "C" and have the exact signature:
 ///   extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
-extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
+///
+/// On Windows/MSVC, we add __declspec(dllexport) to ensure the symbol is
+/// exported from the DLL so LLVM's plugin loader can find it via
+/// GetProcAddress/HMODULE lookup.
+#ifdef _MSC_VER
+#define OLLVM_PLUGIN_EXPORT __declspec(dllexport)
+#else
+#define OLLVM_PLUGIN_EXPORT
+#endif
+
+extern "C" LLVM_ATTRIBUTE_WEAK OLLVM_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
   return getPassPluginInfo();
 }
