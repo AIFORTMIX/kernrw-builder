@@ -7,12 +7,13 @@
 #   2. Clones LLVM 19.1.0 source code from the official repository
 #   3. Clones OLLVM obfuscation pass sources from DreamSoule/ollvm17
 #   4. Copies the Obfuscation passes into the LLVM source tree
-#   5. Copies the standalone plugin project (CMakeLists.txt + OllvmPlugin.cpp)
+#   5. Patches Obfuscation sources for LLVM 19 API compatibility
+#   6. Copies the standalone plugin project (CMakeLists.txt + OllvmPlugin.cpp)
 #      from the repository's ollvm_plugin/ directory
-#   6. Configures and builds LLVM libraries (Release, with clang,
+#   7. Configures and builds LLVM libraries (Release, with clang,
 #      AArch64/ARM/X86 targets) using cmake + ninja + MSVC (cl.exe)
-#   7. Builds the OLLVM obfuscation passes as a standalone loadable plugin DLL
-#   8. Uploads the resulting plugin DLL as a downloadable artifact
+#   8. Builds the OLLVM obfuscation passes as a standalone loadable plugin DLL
+#   9. Uploads the resulting plugin DLL as a downloadable artifact
 #
 # Usage:
 #   - Push to the main branch (or any branch) to trigger
@@ -32,8 +33,6 @@ on:
         description: 'Obfuscation pass source repository'
         required: true
         default: 'https://github.com/DreamSoule/ollvm17.git'
-  push:
-    branches: [main]
 
 env:
   LLVM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.llvm_ref || 'llvmorg-19.1.0' }}
@@ -149,6 +148,63 @@ jobs:
           Get-ChildItem -Path $dst -Name
 
       # ------------------------------------------------------------------
+      # Step 7b: Patch Obfuscation sources for LLVM 19 API compatibility
+      #
+      # LLVM 17 -> 19 API changes cause 4 compilation errors:
+      # 1. FCmpInst constructor: BasicBlock* -> InsertPosition parameter
+      # 2. AllocaInst constructor ambiguity with 0 literal
+      # 3. ConstantExpr::getSub() removed in LLVM 19
+      # 4. CriticalEdgeSplittingOptions constructor param type change
+      # ------------------------------------------------------------------
+      - name: Patch Obfuscation sources for LLVM 19
+        shell: pwsh
+        run: |
+          # Fix 1: BogusControlFlow.cpp - FCmpInst constructor
+          $f1 = "llvm-project/llvm/lib/Passes/Obfuscation/BogusControlFlow.cpp"
+          if (-not (Test-Path $f1)) { throw "BogusControlFlow.cpp not found" }
+          $c1 = Get-Content $f1 -Raw
+          $c1 = $c1 -replace 'new FCmpInst\(\*basicBlock,', 'new FCmpInst(basicBlock,'
+          $c1 = $c1 -replace 'new FCmpInst\(\*originalBB,', 'new FCmpInst(originalBB,'
+          Set-Content -Path $f1 -Value $c1 -Encoding UTF8
+          Write-Host "  [OK] BogusControlFlow.cpp - 2x FCmpInst constructor fixed"
+
+          # Fix 2: Flattening.cpp - AllocaInst constructor ambiguity
+          $f2 = "llvm-project/llvm/lib/Passes/Obfuscation/Flattening.cpp"
+          if (-not (Test-Path $f2)) { throw "Flattening.cpp not found" }
+          $c2 = Get-Content $f2 -Raw
+          $c2 = $c2 -replace 'new AllocaInst\(TYPE_I32, 0, "swVar\.ptr",', 'new AllocaInst(TYPE_I32, 0, nullptr, "swVar.ptr",'
+          Set-Content -Path $f2 -Value $c2 -Encoding UTF8
+          Write-Host "  [OK] Flattening.cpp - AllocaInst constructor disambiguated"
+
+          # Fix 3: IPObfuscationContext.cpp - ConstantExpr::getSub removed
+          $f3 = "llvm-project/llvm/lib/Passes/Obfuscation/IPObfuscationContext.cpp"
+          if (-not (Test-Path $f3)) { throw "IPObfuscationContext.cpp not found" }
+          $c3 = Get-Content $f3 -Raw
+          $c3 = $c3 -replace 'ConstantExpr::getSub\(', 'ConstantExpr::get(Instruction::Sub, '
+          Set-Content -Path $f3 -Value $c3 -Encoding UTF8
+          Write-Host "  [OK] IPObfuscationContext.cpp - ConstantExpr::getSub -> ConstantExpr::get"
+
+          # Fix 4: IndirectBranch.cpp - CriticalEdgeSplittingOptions params
+          $f4 = "llvm-project/llvm/lib/Passes/Obfuscation/IndirectBranch.cpp"
+          if (-not (Test-Path $f4)) { throw "IndirectBranch.cpp not found" }
+          $c4 = Get-Content $f4 -Raw
+          $c4 = $c4 -replace 'CriticalEdgeSplittingOptions\(nullptr,\s*nullptr\)', 'CriticalEdgeSplittingOptions()'
+          Set-Content -Path $f4 -Value $c4 -Encoding UTF8
+          Write-Host "  [OK] IndirectBranch.cpp - CriticalEdgeSplittingOptions default constructor"
+
+          # Verify all patches
+          $ok = 0; $total = 4
+          if (Select-String -Path $f1 -Pattern 'new FCmpInst\(basicBlock' -Quiet) { $ok++ }
+          else { Write-Host "  [FAIL] BogusControlFlow.cpp patch not applied!" }
+          if (Select-String -Path $f2 -Pattern 'new AllocaInst\(TYPE_I32, 0, nullptr' -Quiet) { $ok++ }
+          else { Write-Host "  [FAIL] Flattening.cpp patch not applied!" }
+          if (Select-String -Path $f3 -Pattern 'ConstantExpr::get\(Instruction::Sub, ' -Quiet) { $ok++ }
+          else { Write-Host "  [FAIL] IPObfuscationContext.cpp patch not applied!" }
+          if (Select-String -Path $f4 -Pattern 'CriticalEdgeSplittingOptions\(\)' -Quiet) { $ok++ }
+          else { Write-Host "  [FAIL] IndirectBranch.cpp patch not applied!" }
+          Write-Host "Patch summary: $ok/$total fixes applied successfully"
+
+      # ------------------------------------------------------------------
       # Step 8: Copy the standalone plugin project from repository templates
       #
       # The plugin project templates (CMakeLists.txt + OllvmPlugin.cpp) are
@@ -156,11 +212,6 @@ jobs:
       #
       # This creates a loadable module (DLL) that can be loaded via:
       #   clang -fpass-plugin=OLLVM-Obfuscator.dll
-      #
-      # The plugin project:
-      #   - Uses add_llvm_loadable_module() to create a loadable DLL
-      #   - Compiles the Obfuscation source files into the plugin
-      #   - Registers passes via llvm::PassPluginLibraryInfo
       # ------------------------------------------------------------------
       - name: Setup standalone plugin project from templates
         shell: pwsh
