@@ -138,16 +138,11 @@ PassPluginLibraryInfo getPassPluginInfo() {
 /// The function must be extern "C" and have the exact signature:
 ///   extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 ///
-/// On Windows/MSVC, we add __declspec(dllexport) to ensure the symbol is
-/// exported from the DLL so LLVM's plugin loader can find it via
-/// GetProcAddress/HMODULE lookup.
-#ifdef _MSC_VER
-#define OLLVM_PLUGIN_EXPORT __declspec(dllexport)
-#else
-#define OLLVM_PLUGIN_EXPORT
-#endif
-
-extern "C" LLVM_ATTRIBUTE_WEAK OLLVM_PLUGIN_EXPORT ::llvm::PassPluginLibraryInfo
+/// NOTE: Do NOT add __declspec(dllexport) here. LLVM 19's PassPlugin.h already
+/// declares this function with LLVM_ATTRIBUTE_WEAK (which maps to __declspec(selectany)).
+/// Adding dllexport causes "redefinition; different linkage" error on MSVC.
+/// The WINDOWS_EXPORT_ALL_SYMBOLS CMake property exports all symbols from the DLL.
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
   return getPassPluginInfo();
 }
