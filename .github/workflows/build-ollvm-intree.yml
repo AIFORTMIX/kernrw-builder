@@ -99,7 +99,7 @@ jobs:
 
       # ------------------------------------------------------------------
       # Step 7: Patch Obfuscation sources for LLVM 19 API compatibility
-      #         (Same 4 patches as the plugin workflow)
+      #         (11 patches: 6 original + 5 opaque-pointer additions)
       # ------------------------------------------------------------------
       - name: Patch Obfuscation sources for LLVM 19
         shell: pwsh
@@ -170,7 +170,33 @@ void llvm::fixStack(Function &F) {
           $c6 = $c6 -replace 'DemotePHIToStack\(cast<PHINode>\(I\), AllocaInsertionPoint\)', 'DemotePHIToStack(cast<PHINode>(I), std::nullopt)'
           Set-Content -Path $f6 -Value $c6 -Encoding UTF8
 
-          Write-Host "Applied 8 LLVM 19 API patches"
+          # Fix 7: IndirectCall.cpp - FTy->getPointerTo() + Type::getInt8PtrTy()
+          #        Both removed in LLVM 16+ (opaque pointer migration)
+          $f7 = "$base/IndirectCall.cpp"
+          $c7 = Get-Content $f7 -Raw
+          # FTy->getPointerTo() -> PointerType::getUnqual(Ctx)
+          $c7 = $c7 -replace 'FTy->getPointerTo\(\)', 'PointerType::getUnqual(Ctx)'
+          # Type::getInt8PtrTy(F.getContext()) -> PointerType::getUnqual(F.getContext())
+          #   (2 occurrences: in getBitCast and ArrayType::get)
+          $c7 = $c7 -replace 'Type::getInt8PtrTy\(F\.getContext\(\)\)', 'PointerType::getUnqual(F.getContext())'
+          Set-Content -Path $f7 -Value $c7 -Encoding UTF8
+
+          # Fix 8: IndirectGlobalVariable.cpp - Type::getInt8PtrTy()
+          #        Removed in LLVM 16+ (opaque pointer migration)
+          #        (2 occurrences: in getBitCast and ArrayType::get)
+          $f8 = "$base/IndirectGlobalVariable.cpp"
+          $c8 = Get-Content $f8 -Raw
+          $c8 = $c8 -replace 'Type::getInt8PtrTy\(F\.getContext\(\)\)', 'PointerType::getUnqual(F.getContext())'
+          Set-Content -Path $f8 -Value $c8 -Encoding UTF8
+
+          # Fix 9: IPObfuscationContext.cpp - I32Ty->getPointerTo()
+          #        Removed in LLVM 16+ (opaque pointer migration)
+          $f9 = "$base/IPObfuscationContext.cpp"
+          $c9 = Get-Content $f9 -Raw
+          $c9 = $c9 -replace 'I32Ty->getPointerTo\(\)', 'PointerType::getUnqual(I32Ty->getContext())'
+          Set-Content -Path $f9 -Value $c9 -Encoding UTF8
+
+          Write-Host "Applied 11 LLVM 19 API patches"
 
       # ------------------------------------------------------------------
       # Step 8: Copy RegisterPasses.h/.cpp into the Obfuscation directory
