@@ -120,9 +120,15 @@ jobs:
           Set-Content -Path $f2 -Value $c2 -Encoding UTF8
 
           # Fix 3: ConstantExpr::getSub removed in LLVM 19
+          #        Also fix getBasicBlockList() made private in LLVM 19
           $f3 = "$base/IPObfuscationContext.cpp"
           $c3 = Get-Content $f3 -Raw
           $c3 = $c3 -replace 'ConstantExpr::getSub\(', 'ConstantExpr::get(Instruction::Sub, '
+          # getBasicBlockList() is private in LLVM 19.
+          # Function inherits from ilist, so call splice() directly:
+          #   NF->getBasicBlockList().splice(NF->begin(), F->getBasicBlockList())
+          #     -> NF->splice(NF->begin(), *F)
+          $c3 = $c3 -replace 'NF->getBasicBlockList\(\)\.splice\(NF->begin\(\),\s*F->getBasicBlockList\(\)\)', 'NF->splice(NF->begin(), *F)'
           Set-Content -Path $f3 -Value $c3 -Encoding UTF8
 
           # Fix 4: CriticalEdgeSplittingOptions constructor
@@ -131,7 +137,7 @@ jobs:
           $c4 = $c4 -replace 'CriticalEdgeSplittingOptions\(nullptr,\s*nullptr\)', 'CriticalEdgeSplittingOptions()'
           Set-Content -Path $f4 -Value $c4 -Encoding UTF8
 
-          Write-Host "Applied 4 LLVM 19 API patches"
+          Write-Host "Applied 5 LLVM 19 API patches"
 
       # ------------------------------------------------------------------
       # Step 8: Copy RegisterPasses.h/.cpp into the Obfuscation directory
