@@ -125,10 +125,11 @@ jobs:
           $c3 = Get-Content $f3 -Raw
           $c3 = $c3 -replace 'ConstantExpr::getSub\(', 'ConstantExpr::get(Instruction::Sub, '
           # getBasicBlockList() is private in LLVM 19.
-          # Function inherits from ilist, so call splice() directly:
+          # Function inherits from ilist, so call splice() directly.
+          # splice(iterator, Function*) — F is already Function*:
           #   NF->getBasicBlockList().splice(NF->begin(), F->getBasicBlockList())
-          #     -> NF->splice(NF->begin(), *F)
-          $c3 = $c3 -replace 'NF->getBasicBlockList\(\)\.splice\(NF->begin\(\),\s*F->getBasicBlockList\(\)\)', 'NF->splice(NF->begin(), *F)'
+          #     -> NF->splice(NF->begin(), F)
+          $c3 = $c3 -replace 'NF->getBasicBlockList\(\)\.splice\(NF->begin\(\),\s*F->getBasicBlockList\(\)\)', 'NF->splice(NF->begin(), F)'
           Set-Content -Path $f3 -Value $c3 -Encoding UTF8
 
           # Fix 4: CriticalEdgeSplittingOptions constructor
