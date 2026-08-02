@@ -151,18 +151,21 @@ jobs:
           $f6 = "$base/Utils.cpp"
           $c6 = Get-Content $f6 -Raw
           # Insert valueEscapes() definition before fixStack()
-          $valueEscapesFunc = @'
-static bool valueEscapes(Instruction &Inst) {
-  const BasicBlock *BB = Inst.getParent();
-  for (const User *U : Inst.users()) {
-    const Instruction *UI = cast<Instruction>(U);
-    if (UI->getParent() != BB || isa<PHINode>(UI))
-      return true;
-  }
-  return false;
-}
-void llvm::fixStack(Function &F) {
-'@
+          # NOTE: Cannot use PowerShell here-string (@'...'@) because the
+          # closing '@ must be at column 1, which breaks YAML block scalar
+          # indentation. Use array-join instead.
+          $valueEscapesFunc = @(
+            'static bool valueEscapes(Instruction &Inst) {',
+            '  const BasicBlock *BB = Inst.getParent();',
+            '  for (const User *U : Inst.users()) {',
+            '    const Instruction *UI = cast<Instruction>(U);',
+            '    if (UI->getParent() != BB || isa<PHINode>(UI))',
+            '      return true;',
+            '  }',
+            '  return false;',
+            '}',
+            'void llvm::fixStack(Function &F) {'
+          ) -join "`n"
           $c6 = $c6 -replace 'void llvm::fixStack\(Function &F\) \{', $valueEscapesFunc
           # DemoteRegToStack: CastInst* -> std::nullopt (insert at entry block)
           $c6 = $c6 -replace 'DemoteRegToStack\(\*I, false, AllocaInsertionPoint\)', 'DemoteRegToStack(*I, false, std::nullopt)'
