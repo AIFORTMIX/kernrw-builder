@@ -132,13 +132,45 @@ jobs:
           $c3 = $c3 -replace 'NF->getBasicBlockList\(\)\.splice\(NF->begin\(\),\s*F->getBasicBlockList\(\)\)', 'NF->splice(NF->begin(), F)'
           Set-Content -Path $f3 -Value $c3 -Encoding UTF8
 
-          # Fix 4: CriticalEdgeSplittingOptions constructor
+          # Fix 4: CriticalEdgeSplittingOptions + getInt8PtrTy (IndirectBranch.cpp)
           $f4 = "$base/IndirectBranch.cpp"
           $c4 = Get-Content $f4 -Raw
           $c4 = $c4 -replace 'CriticalEdgeSplittingOptions\(nullptr,\s*nullptr\)', 'CriticalEdgeSplittingOptions()'
+          # Type::getInt8PtrTy removed in LLVM 19 (opaque pointers)
+          $c4 = $c4 -replace 'Type::getInt8PtrTy\(F\.getContext\(\)\)', 'PointerType::getUnqual(F.getContext())'
           Set-Content -Path $f4 -Value $c4 -Encoding UTF8
 
-          Write-Host "Applied 5 LLVM 19 API patches"
+          # Fix 5: IRBuilder::getInt8PtrTy removed in LLVM 19 (StringEncryption.cpp)
+          $f5 = "$base/StringEncryption.cpp"
+          $c5 = Get-Content $f5 -Raw
+          $c5 = $c5 -replace 'IRB\.getInt8PtrTy\(\)', 'PointerType::getUnqual(IRB.getContext())'
+          Set-Content -Path $f5 -Value $c5 -Encoding UTF8
+
+          # Fix 6: valueEscapes removed + DemoteRegToStack/DemotePHIToStack
+          #        3rd param changed to std::optional<iterator> (Utils.cpp)
+          $f6 = "$base/Utils.cpp"
+          $c6 = Get-Content $f6 -Raw
+          # Insert valueEscapes() definition before fixStack()
+          $valueEscapesFunc = @'
+static bool valueEscapes(Instruction &Inst) {
+  const BasicBlock *BB = Inst.getParent();
+  for (const User *U : Inst.users()) {
+    const Instruction *UI = cast<Instruction>(U);
+    if (UI->getParent() != BB || isa<PHINode>(UI))
+      return true;
+  }
+  return false;
+}
+void llvm::fixStack(Function &F) {
+'@
+          $c6 = $c6 -replace 'void llvm::fixStack\(Function &F\) \{', $valueEscapesFunc
+          # DemoteRegToStack: CastInst* -> std::nullopt (insert at entry block)
+          $c6 = $c6 -replace 'DemoteRegToStack\(\*I, false, AllocaInsertionPoint\)', 'DemoteRegToStack(*I, false, std::nullopt)'
+          # DemotePHIToStack: CastInst* -> std::nullopt
+          $c6 = $c6 -replace 'DemotePHIToStack\(cast<PHINode>\(I\), AllocaInsertionPoint\)', 'DemotePHIToStack(cast<PHINode>(I), std::nullopt)'
+          Set-Content -Path $f6 -Value $c6 -Encoding UTF8
+
+          Write-Host "Applied 8 LLVM 19 API patches"
 
       # ------------------------------------------------------------------
       # Step 8: Copy RegisterPasses.h/.cpp into the Obfuscation directory
