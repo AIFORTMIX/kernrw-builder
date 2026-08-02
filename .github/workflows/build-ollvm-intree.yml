@@ -1,0 +1,383 @@
+# ============================================================================
+# Workflow: Build OLLVM In-Tree (Baked Into clang) for LLVM 19.x / Windows x64
+#
+# Instead of building a loadable plugin DLL (which NDK's statically-linked
+# clang cannot load), this workflow bakes the OLLVM obfuscation passes
+# DIRECTLY into the clang binary via in-tree registration.
+#
+# The resulting clang.exe has OLLVM passes permanently built-in.
+# Passes are enabled via -mllvm flags: -mllvm -fla -mllvm -bcf -mllvm -sub
+#
+# After building, copy clang.exe/clang++.exe/clang-cl.exe into your NDK's
+# toolchains/llvm/prebuilt/windows-x86_64/bin/ directory (backup originals first).
+# Then add -mllvm flags to your project's CMakeLists.txt.
+#
+# Build time: ~1.5-2 hours on GitHub Actions windows-latest (one-time cost)
+# ============================================================================
+
+name: Build OLLVM In-Tree (LLVM 19, Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: 'LLVM git ref (tag or branch)'
+        required: true
+        default: 'llvmorg-19.1.0'
+      obfuscation_repo:
+        description: 'Obfuscation pass source repository'
+        required: true
+        default: 'https://github.com/DreamSoule/ollvm17.git'
+
+env:
+  LLVM_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.llvm_ref || 'llvmorg-19.1.0' }}
+  OBFUSCATION_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.obfuscation_repo || 'https://github.com/DreamSoule/ollvm17.git' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # Step 1: Checkout this repository (contains RegisterPasses.h/.cpp)
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ------------------------------------------------------------------
+      # Step 2: Setup MSVC build environment
+      # ------------------------------------------------------------------
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ------------------------------------------------------------------
+      # Step 3: Install build tools
+      # ------------------------------------------------------------------
+      - name: Install Ninja and Python
+        run: |
+          choco install ninja --no-progress --yes
+          # Python is pre-installed on windows-latest, just verify
+          python --version
+
+      # ------------------------------------------------------------------
+      # Step 4: Clone LLVM source
+      # ------------------------------------------------------------------
+      - name: Clone LLVM ${{ env.LLVM_REF }}
+        shell: pwsh
+        run: |
+          Write-Host "Cloning LLVM at ref: $env:LLVM_REF"
+          git clone --depth 1 --branch $env:LLVM_REF `
+            https://github.com/llvm/llvm-project.git llvm-project
+          if ($LASTEXITCODE -ne 0) { throw "Failed to clone LLVM" }
+          git -C llvm-project log --oneline -1
+
+      # ------------------------------------------------------------------
+      # Step 5: Clone OLLVM obfuscation pass sources
+      # ------------------------------------------------------------------
+      - name: Clone OLLVM obfuscation sources
+        shell: pwsh
+        run: |
+          git clone --depth 1 $env:OBFUSCATION_REPO ollvm17
+          if ($LASTEXITCODE -ne 0) { throw "Failed to clone obfuscation repo" }
+
+      # ------------------------------------------------------------------
+      # Step 6: Copy Obfuscation passes into LLVM source tree
+      # ------------------------------------------------------------------
+      - name: Copy Obfuscation passes into LLVM tree
+        shell: pwsh
+        run: |
+          $src = "ollvm17/llvm-project/llvm/lib/Passes/Obfuscation"
+          $dst = "llvm-project/llvm/lib/Passes/Obfuscation"
+          if (-not (Test-Path $src)) { throw "Obfuscation source not found at $src" }
+          Copy-Item -Recurse -Force $src $dst
+          Write-Host "Obfuscation files copied:"
+          Get-ChildItem -Path $dst -Name
+
+      # ------------------------------------------------------------------
+      # Step 7: Patch Obfuscation sources for LLVM 19 API compatibility
+      #         (Same 4 patches as the plugin workflow)
+      # ------------------------------------------------------------------
+      - name: Patch Obfuscation sources for LLVM 19
+        shell: pwsh
+        run: |
+          $base = "llvm-project/llvm/lib/Passes/Obfuscation"
+
+          # Fix 1: FCmpInst constructor (BasicBlock* -> InsertPosition)
+          $f1 = "$base/BogusControlFlow.cpp"
+          $c1 = Get-Content $f1 -Raw
+          $c1 = $c1 -replace 'new FCmpInst\(\*basicBlock,', 'new FCmpInst(basicBlock,'
+          $c1 = $c1 -replace 'new FCmpInst\(\*originalBB,', 'new FCmpInst(originalBB,'
+          Set-Content -Path $f1 -Value $c1 -Encoding UTF8
+
+          # Fix 2: AllocaInst constructor ambiguity
+          $f2 = "$base/Flattening.cpp"
+          $c2 = Get-Content $f2 -Raw
+          $c2 = $c2 -replace 'new AllocaInst\(TYPE_I32, 0, "swVar\.ptr",', 'new AllocaInst(TYPE_I32, 0, nullptr, "swVar.ptr",'
+          Set-Content -Path $f2 -Value $c2 -Encoding UTF8
+
+          # Fix 3: ConstantExpr::getSub removed in LLVM 19
+          $f3 = "$base/IPObfuscationContext.cpp"
+          $c3 = Get-Content $f3 -Raw
+          $c3 = $c3 -replace 'ConstantExpr::getSub\(', 'ConstantExpr::get(Instruction::Sub, '
+          Set-Content -Path $f3 -Value $c3 -Encoding UTF8
+
+          # Fix 4: CriticalEdgeSplittingOptions constructor
+          $f4 = "$base/IndirectBranch.cpp"
+          $c4 = Get-Content $f4 -Raw
+          $c4 = $c4 -replace 'CriticalEdgeSplittingOptions\(nullptr,\s*nullptr\)', 'CriticalEdgeSplittingOptions()'
+          Set-Content -Path $f4 -Value $c4 -Encoding UTF8
+
+          Write-Host "Applied 4 LLVM 19 API patches"
+
+      # ------------------------------------------------------------------
+      # Step 8: Copy RegisterPasses.h/.cpp into the Obfuscation directory
+      #
+      # These files replace the plugin entry point (llvmGetPassPluginInfo)
+          # with a direct registration function (registerOLLVMPasses) that is
+          # called from PassBuilder.cpp's constructor.
+      # ------------------------------------------------------------------
+      - name: Copy in-tree registration files
+        shell: pwsh
+        run: |
+          $dst = "llvm-project/llvm/lib/Passes/Obfuscation"
+          Copy-Item -Path "ollvm_plugin/RegisterPasses.h" -Destination "$dst/RegisterPasses.h" -Force
+          Copy-Item -Path "ollvm_plugin/RegisterPasses.cpp" -Destination "$dst/RegisterPasses.cpp" -Force
+          Write-Host "RegisterPasses.h/.cpp copied to Obfuscation directory"
+          Get-ChildItem -Path $dst -Filter "Register*" -Name
+
+      # ------------------------------------------------------------------
+      # Step 9: Patch llvm/lib/Passes/CMakeLists.txt
+          #
+          # Add all Obfuscation source files (including RegisterPasses.cpp)
+          # to the LLVMPasses library, so they get compiled into clang
+          # automatically. Also add the Obfuscation include directory.
+      # ------------------------------------------------------------------
+      - name: Patch CMakeLists.txt — add Obfuscation sources to LLVMPasses
+        shell: pwsh
+        run: |
+          $f = "llvm-project/llvm/lib/Passes/CMakeLists.txt"
+          $lines = Get-Content $f
+
+          # Find the add_llvm_component_library(LLVMPasses line
+          $insertIdx = -1
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+              if ($lines[$i] -match 'add_llvm_component_library\(LLVMPasses') {
+                  $insertIdx = $i + 1
+                  break
+              }
+          }
+          if ($insertIdx -eq -1) { throw "Could not find LLVMPasses in CMakeLists.txt" }
+
+          $ollvmSources = @(
+              "  # OLLVM obfuscation passes (in-tree registration)",
+              "  Obfuscation/BogusControlFlow.cpp",
+              "  Obfuscation/CryptoUtils.cpp",
+              "  Obfuscation/Flattening.cpp",
+              "  Obfuscation/IPObfuscationContext.cpp",
+              "  Obfuscation/ObfuscationOptions.cpp",
+              "  Obfuscation/SplitBasicBlock.cpp",
+              "  Obfuscation/StringEncryption.cpp",
+              "  Obfuscation/Substitution.cpp",
+              "  Obfuscation/Utils.cpp",
+              "  Obfuscation/IndirectBranch.cpp",
+              "  Obfuscation/IndirectCall.cpp",
+              "  Obfuscation/IndirectGlobalVariable.cpp",
+              "  Obfuscation/RegisterPasses.cpp"
+          )
+
+          $newLines = @()
+          $newLines += $lines[0..($insertIdx - 1)]
+          $newLines += $ollvmSources
+          $newLines += $lines[$insertIdx..($lines.Length - 1)]
+
+          # Add include directory for Obfuscation headers
+          $newLines += ""
+          $newLines += "# OLLVM: include path for Obfuscation headers"
+          $newLines += 'target_include_directories(LLVMPasses PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Obfuscation)'
+
+          Set-Content -Path $f -Value $newLines -Encoding UTF8
+          Write-Host "CMakeLists.txt patched: Obfuscation sources added to LLVMPasses"
+
+      # ------------------------------------------------------------------
+      # Step 10: Patch llvm/lib/Passes/PassBuilder.cpp
+          #
+          # Add #include "Obfuscation/RegisterPasses.h" and call
+          # registerOLLVMPasses(*this) in the PassBuilder constructor.
+      # ------------------------------------------------------------------
+      - name: Patch PassBuilder.cpp — register OLLVM passes in constructor
+        shell: pwsh
+        run: |
+          $f = "llvm-project/llvm/lib/Passes/PassBuilder.cpp"
+          $lines = Get-Content $f
+
+          # --- Add #include ---
+          # Find the first #include line and add our include after it
+          $includeIdx = -1
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+              if ($lines[$i] -match '^\s*#include\s') {
+                  $includeIdx = $i
+                  break
+              }
+          }
+          if ($includeIdx -eq -1) { throw "Could not find any #include in PassBuilder.cpp" }
+
+          $newLines = @()
+          $newLines += $lines[0..$includeIdx]
+          $newLines += '#include "Obfuscation/RegisterPasses.h" // OLLVM'
+          $newLines += $lines[($includeIdx + 1)..($lines.Length - 1)]
+          $lines = $newLines
+
+          # --- Add registerOLLVMPasses(*this) call ---
+          # Strategy 1: Find RegisterPassBuilderCallbacks(*this) and add after it
+          $inserted = $false
+          for ($i = 0; $i -lt $lines.Length; $i++) {
+              if ($lines[$i] -match 'RegisterPassBuilderCallbacks\(\*this\)') {
+                  $newLines = @()
+                  $newLines += $lines[0..$i]
+                  $newLines += '  registerOLLVMPasses(*this); // OLLVM obfuscation passes'
+                  $newLines += $lines[($i + 1)..($lines.Length - 1)]
+                  $lines = $newLines
+                  $inserted = $true
+                  Write-Host "Inserted registerOLLVMPasses after RegisterPassBuilderCallbacks (line $($i+1))"
+                  break
+              }
+          }
+
+          # Strategy 2 (fallback): Find PassBuilder constructor closing brace
+          if (-not $inserted) {
+              Write-Host "RegisterPassBuilderCallbacks not found, using constructor brace fallback..."
+              $ctorIdx = -1
+              for ($i = 0; $i -lt $lines.Length; $i++) {
+                  if ($lines[$i] -match '^PassBuilder::PassBuilder\(') {
+                      $ctorIdx = $i
+                      break
+                  }
+              }
+              if ($ctorIdx -eq -1) { throw "Could not find PassBuilder constructor" }
+
+              # Find first ^} after constructor (its closing brace)
+              for ($i = ($ctorIdx + 1); $i -lt $lines.Length; $i++) {
+                  if ($lines[$i] -match '^\}') {
+                      $newLines = @()
+                      $newLines += $lines[0..($i - 1)]
+                      $newLines += '  registerOLLVMPasses(*this); // OLLVM obfuscation passes'
+                      $newLines += $lines[$i..($lines.Length - 1)]
+                      $lines = $newLines
+                      $inserted = $true
+                      Write-Host "Inserted registerOLLVMPasses before constructor closing brace (line $($i+1))"
+                      break
+                  }
+              }
+          }
+
+          if (-not $inserted) { throw "Failed to insert registerOLLVMPasses call" }
+
+          Set-Content -Path $f -Value $lines -Encoding UTF8
+          Write-Host "PassBuilder.cpp patched successfully"
+
+      # ------------------------------------------------------------------
+      # Step 11: Configure LLVM build
+          #
+          # Key optimizations to minimize build time:
+          #   - Only build clang (not lld, lldb, etc.)
+          #   - Only AArch64 + ARM + X86 targets (X86 for host tablegen)
+          #   - Release build, no assertions
+          #   - No tests, examples, docs, benchmarks
+          #   - LLVM_ENABLE_PLUGINS=OFF (in-tree, no plugin loading needed)
+      # ------------------------------------------------------------------
+      - name: Configure LLVM with CMake
+        shell: pwsh
+        run: |
+          cmake -S llvm-project/llvm -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DLLVM_ENABLE_PROJECTS=clang `
+            -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" `
+            -DLLVM_ENABLE_ASSERTIONS=OFF `
+            -DLLVM_INCLUDE_TESTS=OFF `
+            -DLLVM_INCLUDE_EXAMPLES=OFF `
+            -DLLVM_INCLUDE_DOCS=OFF `
+            -DLLVM_INCLUDE_BENCHMARKS=OFF `
+            -DLLVM_ENABLE_PLUGINS=OFF `
+            -DLLVM_BUILD_LLVM_DYLIB=OFF `
+            -DLLVM_ENABLE_EH=OFF `
+            -DLLVM_ENABLE_RTTI=OFF `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_CXX_STANDARD=17
+          if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+          Write-Host "CMake configuration completed"
+
+      # ------------------------------------------------------------------
+      # Step 12: Build clang (this is the long step, ~1-2 hours)
+      #
+      # Building only the 'clang' target pulls in all required LLVM
+      # libraries (including LLVMPasses which now contains OLLVM).
+      # ------------------------------------------------------------------
+      - name: Build clang
+        shell: pwsh
+        run: |
+          Write-Host "Building clang (this may take 1-2 hours)..."
+          ninja -C build clang
+          if ($LASTEXITCODE -ne 0) { throw "clang build failed" }
+          Write-Host "clang built successfully!"
+
+      # ------------------------------------------------------------------
+      # Step 13: Package clang binaries
+          #
+          # On Windows, clang++ and clang-cl may be symlinks or may not
+          # exist. We create copies of clang.exe to ensure all three
+          # are available for the NDK toolchain.
+      # ------------------------------------------------------------------
+      - name: Package clang binaries
+        shell: pwsh
+        run: |
+          $binDir = "build/bin"
+          $outDir = "ollvm-clang-output"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          # Verify clang.exe exists
+          if (-not (Test-Path "$binDir/clang.exe")) {
+              throw "clang.exe not found in $binDir"
+          }
+
+          # Copy clang.exe
+          Copy-Item "$binDir/clang.exe" "$outDir/clang.exe" -Force
+          Write-Host "Copied clang.exe"
+
+          # Create clang++.exe if it doesn't exist or is a symlink
+          if (Test-Path "$binDir/clang++.exe") {
+              Copy-Item "$binDir/clang++.exe" "$outDir/clang++.exe" -Force
+          } else {
+              Copy-Item "$binDir/clang.exe" "$outDir/clang++.exe" -Force
+              Write-Host "Created clang++.exe as copy of clang.exe"
+          }
+
+          # Create clang-cl.exe if it doesn't exist
+          if (Test-Path "$binDir/clang-cl.exe") {
+              Copy-Item "$binDir/clang-cl.exe" "$outDir/clang-cl.exe" -Force
+          } else {
+              Copy-Item "$binDir/clang.exe" "$outDir/clang-cl.exe" -Force
+              Write-Host "Created clang-cl.exe as copy of clang.exe"
+          }
+
+          # Show output
+          Write-Host "Packaged binaries:"
+          Get-ChildItem $outDir | Format-Table Name, Length
+
+      # ------------------------------------------------------------------
+      # Step 14: Upload clang binaries as artifact
+      # ------------------------------------------------------------------
+      - name: Upload OLLVM-enabled clang
+        uses: actions/upload-artifact@v4
+        with:
+          name: OLLVM-clang-LLVM19-Windows-x64
+          path: |
+            ollvm-clang-output/clang.exe
+            ollvm-clang-output/clang++.exe
+            ollvm-clang-output/clang-cl.exe
+          if-no-files-found: error
+          retention-days: 90
