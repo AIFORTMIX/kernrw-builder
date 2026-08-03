@@ -99,7 +99,7 @@ jobs:
 
       # ------------------------------------------------------------------
       # Step 7: Patch Obfuscation sources for LLVM 19 API compatibility
-      #         (13 patches: 6 original + 5 opaque-pointer + FLA crash fix)
+      #         (12 patches: 6 original + 5 opaque-pointer + FLA crash fix)
       # ------------------------------------------------------------------
       - name: Patch Obfuscation sources for LLVM 19
         shell: pwsh
@@ -201,17 +201,18 @@ jobs:
 
           # Fix 10: Flattening.cpp - FlatteningPass crash (0xC0000005 ACCESS_VIOLATION)
           #         Root cause: duplicate eraseFromParent() on entryBB's already-deleted terminator
-          #         Fix: (a) remove if(bEntryBB_isConditional) guard, always erase
-          #              (b) change second occurrence from entryBB to BB
+          #         Fix: unwrap both if(bEntryBB_isConditional) blocks, keeping their inner statements
+          #           - First block: entryBB.getTerminator()->eraseFromParent(); (keep as-is)
+          #           - Second block: BB->getTerminator()->eraseFromParent(); (keep as-is)
           $f10 = "$base/Flattening.cpp"
           $c10 = Get-Content $f10 -Raw
-          $c10 = $c10 -replace 'entryBB\.getTerminator\(\)->eraseFromParent\(\)', 'BB->getTerminator()->eraseFromParent()'
-          $c10 = $c10 -replace 'BB->getTerminator\(\)->eraseFromParent\(\)', 'entryBB.getTerminator()->eraseFromParent()', 1
-          $c10 = $c10 -replace '(?m)^\s*if\s*\(\s*bEntryBB_isConditional\s*\)\s*\{\s*\r?\n\s*entryBB\.getTerminator\(\)->eraseFromParent\(\);\s*\r?\n\s*\}', 'entryBB.getTerminator()->eraseFromParent();'
-          $c10 = $c10 -replace '(?m)^\s*if\s*\(\s*bEntryBB_isConditional\s*\)\s*\{\s*\r?\n\s*BB->getTerminator\(\)->eraseFromParent\(\);\s*\r?\n\s*\}', 'BB->getTerminator()->eraseFromParent();'
+          # Unwrap if-block containing entryBB.getTerminator()->eraseFromParent()
+          $c10 = $c10 -replace '(?m)^\s*if\s*\(\s*bEntryBB_isConditional\s*\)\s*\{\s*\r?\n\s*(entryBB\.getTerminator\(\)->eraseFromParent\(\);)\s*\r?\n\s*\}', '$1'
+          # Unwrap if-block containing BB->getTerminator()->eraseFromParent()
+          $c10 = $c10 -replace '(?m)^\s*if\s*\(\s*bEntryBB_isConditional\s*\)\s*\{\s*\r?\n\s*(BB->getTerminator\(\)->eraseFromParent\(\);)\s*\r?\n\s*\}', '$1'
           Set-Content -Path $f10 -Value $c10 -Encoding UTF8
 
-          Write-Host "Applied 13 LLVM 19 API patches (including FLA crash fix)"
+          Write-Host "Applied 12 LLVM 19 API patches (including FLA crash fix)"
 
       # ------------------------------------------------------------------
       # Step 8: Copy RegisterPasses.h/.cpp into the Obfuscation directory
